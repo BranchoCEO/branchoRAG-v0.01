@@ -6,7 +6,7 @@ use std::io::Write;
 use walkdir::WalkDir;
 
 // --- BLOCK 1: DATA ---
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize)]
 struct FileNode {
     path: String,
     content: String,
@@ -42,33 +42,33 @@ impl BranchoRAG {
         // Track paths we've already seen to avoid duplicates
         let mut seen: HashSet<String> = self.data.nodes.iter().map(|n| n.path.clone()).collect();
 
-        for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-            let is_ignored = entry.path().components().any(|c| {
-                ignore_list.contains(&c.as_os_str().to_str().unwrap_or(""))
-            });
-            if is_ignored {
+        let walker = WalkDir::new(path).into_iter();
+
+        // filter_entry prunes ignored dirs entirely — WalkDir won't descend into them at all,
+        // which is much faster than checking every file inside .git, node_modules, etc.
+        for entry in walker.filter_entry(|e| {
+            let name = e.file_name().to_str().unwrap_or("");
+            !ignore_list.contains(&name)
+        }).filter_map(|e| e.ok()) {
+            if !entry.file_type().is_file() {
                 continue;
             }
 
-            if entry.file_type().is_file() {
-                let path_str = entry.path().display().to_string();
+            let path_str = entry.path().display().to_string();
+            if seen.contains(&path_str) {
+                continue;
+            }
 
-                if !seen.contains(&path_str) {
-                    // Skip files that are too large before attempting to read them
-                    let size = entry.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
-                    if size > MAX_FILE_BYTES {
-                        continue;
-                    }
+            // Check size before reading to avoid loading huge files into memory
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+            if size > MAX_FILE_BYTES {
+                continue;
+            }
 
-                    // read_to_string naturally skips binary files that aren't valid UTF-8
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        self.data.nodes.push(FileNode {
-                            path: path_str.clone(),
-                            content,
-                        });
-                        seen.insert(path_str);
-                    }
-                }
+            // read_to_string naturally skips binary files that aren't valid UTF-8
+            if let Ok(content) = fs::read_to_string(entry.path()) {
+                seen.insert(path_str.clone());
+                self.data.nodes.push(FileNode { path: path_str, content });
             }
         }
         Ok(())
